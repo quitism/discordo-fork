@@ -117,26 +117,64 @@ func (ml *messagesList) buildItem(index int, cursor int) tview.ScrollListItem {
 	}
 
 	message := ml.messages[index]
+
+	var imageAttachments []discord.Attachment
+	if ui.IsSixelSupported() {
+		for _, a := range message.Attachments {
+			if strings.HasPrefix(a.ContentType, "image/") {
+				imageAttachments = append(imageAttachments, a)
+			}
+		}
+	}
+
+	shouldSkipLinks := len(imageAttachments) > 0
+
 	tv := tview.NewTextView().
 		SetWrap(true).
 		SetWordWrap(true).
 		SetDynamicColors(true).
-		SetText(ml.renderMessage(message))
+		SetText(ml.renderMessage(message, shouldSkipLinks))
 	if index == cursor {
 		tv.SetTextStyle(ml.cfg.Theme.MessagesList.SelectedMessageStyle.Style)
 	} else {
 		tv.SetTextStyle(ml.cfg.Theme.MessagesList.MessageStyle.Style)
 	}
-	return tv
+
+	if len(imageAttachments) == 0 {
+		return tv
+	}
+
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	flex.AddItem(tv, 0, 1, false)
+
+	_, screenH := ml.chatView.screen.Size()
+	h := screenH / 4
+	if h < 5 {
+		h = 5
+	}
+	if h > 20 {
+		h = 20
+	}
+
+	for _, a := range imageAttachments {
+		iv := NewAttachmentView(ml.chatView.app, a.URL, a.Filename)
+		flex.AddItem(iv, h, 1, false)
+	}
+
+	return &messageContainer{
+		Flex:              flex,
+		tv:                tv,
+		attachmentsHeight: len(imageAttachments) * h,
+	}
 }
 
-func (ml *messagesList) renderMessage(message discord.Message) string {
+func (ml *messagesList) renderMessage(message discord.Message, skipImageLinks bool) string {
 	var b strings.Builder
-	ml.writeMessage(&b, message)
+	ml.writeMessage(&b, message, skipImageLinks)
 	return b.String()
 }
 
-func (ml *messagesList) writeMessage(writer io.Writer, message discord.Message) {
+func (ml *messagesList) writeMessage(writer io.Writer, message discord.Message, skipImageLinks bool) {
 	if ml.cfg.HideBlockedUsers {
 		isBlocked := ml.chatView.state.UserIsBlocked(message.Author.ID)
 		if isBlocked {
@@ -153,14 +191,14 @@ func (ml *messagesList) writeMessage(writer io.Writer, message discord.Message) 
 		if message.Reference != nil && message.Reference.Type == discord.MessageReferenceTypeForward {
 			ml.drawForwardedMessage(writer, message)
 		} else {
-			ml.drawDefaultMessage(writer, message)
+			ml.drawDefaultMessage(writer, message, skipImageLinks)
 		}
 	case discord.GuildMemberJoinMessage:
 		ml.drawTimestamps(writer, message.Timestamp)
 		ml.drawAuthor(writer, message)
 		fmt.Fprint(writer, "joined the server.")
 	case discord.InlinedReplyMessage:
-		ml.drawReplyMessage(writer, message)
+		ml.drawReplyMessage(writer, message, skipImageLinks)
 	case discord.ChannelPinnedMessage:
 		ml.drawPinnedMessage(writer, message)
 	default:
@@ -220,7 +258,7 @@ func (ml *messagesList) drawSnapshotContent(w io.Writer, message discord.Message
 	w.Write(c)
 }
 
-func (ml *messagesList) drawDefaultMessage(w io.Writer, message discord.Message) {
+func (ml *messagesList) drawDefaultMessage(w io.Writer, message discord.Message, skipImageLinks bool) {
 	if ml.cfg.Timestamps.Enabled {
 		ml.drawTimestamps(w, message.Timestamp)
 	}
@@ -233,6 +271,10 @@ func (ml *messagesList) drawDefaultMessage(w io.Writer, message discord.Message)
 	}
 
 	for _, a := range message.Attachments {
+		if skipImageLinks && strings.HasPrefix(a.ContentType, "image/") {
+			continue
+		}
+
 		fmt.Fprintln(w)
 
 		fg := ml.cfg.Theme.MessagesList.AttachmentStyle.GetForeground()
@@ -253,7 +295,7 @@ func (ml *messagesList) drawForwardedMessage(w io.Writer, message discord.Messag
 	fmt.Fprintf(w, " [::d](%s)[-:-:-] ", ml.formatTimestamp(message.MessageSnapshots[0].Message.Timestamp))
 }
 
-func (ml *messagesList) drawReplyMessage(w io.Writer, message discord.Message) {
+func (ml *messagesList) drawReplyMessage(w io.Writer, message discord.Message, skipImageLinks bool) {
 	// reply
 	fmt.Fprintf(w, "[::d]%s ", ml.cfg.Theme.MessagesList.ReplyIndicator)
 	if m := message.ReferencedMessage; m != nil {
@@ -266,7 +308,7 @@ func (ml *messagesList) drawReplyMessage(w io.Writer, message discord.Message) {
 
 	io.WriteString(w, "\n")
 	// main
-	ml.drawDefaultMessage(w, message)
+	ml.drawDefaultMessage(w, message, skipImageLinks)
 }
 
 func (ml *messagesList) drawPinnedMessage(w io.Writer, message discord.Message) {
@@ -753,4 +795,14 @@ func (ml *messagesList) waitForChunkEvent() uint {
 
 	<-ml.fetchingMembers.done
 	return ml.fetchingMembers.count
+}
+
+type messageContainer struct {
+	*tview.Flex
+	tv                *tview.TextView
+	attachmentsHeight int
+}
+
+func (m *messageContainer) Height(width int) int {
+	return m.tv.Height(width) + m.attachmentsHeight
 }

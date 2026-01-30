@@ -17,6 +17,7 @@ import (
 
 type App struct {
 	inner    *tview.Application
+	screen   tcell.Screen
 	chatView *chat.View
 	cfg      *config.Config
 }
@@ -46,23 +47,24 @@ func (a *App) Run() error {
 		token = t
 	}
 
-	screen, err := tcell.NewScreen()
+	var err error
+	a.screen, err = tcell.NewScreen()
 	if err != nil {
 		return fmt.Errorf("failed to create screen: %w", err)
 	}
 
-	if err := screen.Init(); err != nil {
+	if err := a.screen.Init(); err != nil {
 		return fmt.Errorf("failed to init screen: %w", err)
 	}
 
 	if a.cfg.Mouse {
-		screen.EnableMouse()
+		a.screen.EnableMouse()
 	}
 
-	screen.SetTitle(consts.Name)
-	screen.EnablePaste()
-	screen.EnableFocus()
-	a.inner.SetScreen(screen)
+	a.screen.SetTitle(consts.Name)
+	a.screen.EnablePaste()
+	a.screen.EnableFocus()
+	a.inner.SetScreen(a.screen)
 
 	if token == "" {
 		loginForm := login.NewForm(a.inner, a.cfg, func(token string) {
@@ -81,7 +83,7 @@ func (a *App) Run() error {
 }
 
 func (a *App) showChatView(token string) error {
-	a.chatView = chat.NewView(a.inner, a.cfg, a.quit)
+	a.chatView = chat.NewView(a.inner, a.screen, a.cfg, a.quit)
 	if err := a.chatView.OpenState(token); err != nil {
 		return err
 	}
