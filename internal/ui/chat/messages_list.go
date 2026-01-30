@@ -3,7 +3,12 @@ package chat
 import (
 	"context"
 	"errors"
+	"bytes"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +20,8 @@ import (
 	"time"
 
 	"github.com/ayn2op/discordo/internal/clipboard"
+	"github.com/ayn2op/discordo/internal/sixel"
+	"github.com/nfnt/resize"
 	"github.com/ayn2op/discordo/internal/config"
 	"github.com/ayn2op/discordo/internal/consts"
 	"github.com/ayn2op/discordo/internal/markdown"
@@ -33,6 +40,11 @@ import (
 	"github.com/yuin/goldmark/text"
 )
 
+type sixelCacheItem struct {
+	data []byte
+	rows int
+}
+
 type messagesList struct {
 	*tview.ScrollList
 	cfg      *config.Config
@@ -47,14 +59,20 @@ type messagesList struct {
 		count uint
 		done  chan struct{}
 	}
+
+	sixelCache     map[discord.AttachmentID]sixelCacheItem
+	fetchingImages map[discord.AttachmentID]struct{}
+	imagesMu       sync.Mutex
 }
 
 func newMessagesList(cfg *config.Config, chatView *View) *messagesList {
 	ml := &messagesList{
-		ScrollList: tview.NewScrollList(),
-		cfg:        cfg,
-		chatView:   chatView,
-		renderer:   markdown.NewRenderer(cfg.Theme.MessagesList),
+		ScrollList:     tview.NewScrollList(),
+		cfg:            cfg,
+		chatView:       chatView,
+		renderer:       markdown.NewRenderer(cfg.Theme.MessagesList),
+		sixelCache:     make(map[discord.AttachmentID]sixelCacheItem),
+		fetchingImages: make(map[discord.AttachmentID]struct{}),
 	}
 
 	ml.Box = ui.ConfigureBox(ml.Box, &cfg.Theme)
@@ -67,6 +85,12 @@ func newMessagesList(cfg *config.Config, chatView *View) *messagesList {
 
 func (ml *messagesList) reset() {
 	ml.messages = nil
+	ml.imagesMu.Lock()
+	// clear map (Go 1.21+)
+	for k := range ml.sixelCache {
+		delete(ml.sixelCache, k)
+	}
+	ml.imagesMu.Unlock()
 	ml.
 		Clear().
 		SetBuilder(ml.buildItem).
@@ -127,7 +151,96 @@ func (ml *messagesList) buildItem(index int, cursor int) tview.ScrollListItem {
 	} else {
 		tv.SetTextStyle(ml.cfg.Theme.MessagesList.MessageStyle.Style)
 	}
+
+	if sixel.Enabled {
+		for _, a := range message.Attachments {
+			if !strings.HasPrefix(a.ContentType, "image/") {
+				continue
+			}
+
+			ml.imagesMu.Lock()
+			item, cached := ml.sixelCache[a.ID]
+			_, fetching := ml.fetchingImages[a.ID]
+			ml.imagesMu.Unlock()
+
+			if cached {
+				// Add padding to the text view
+				tv.SetText(tv.GetText(false) + strings.Repeat("\n", item.rows))
+				x, y, w, h := ml.GetInnerRect()
+				return NewMessageItem(tv, item.data, item.rows, Rect{X: x, Y: y, W: w, H: h})
+			}
+
+			if !fetching {
+				go ml.fetchImage(a)
+			}
+			// Only render the first image for now
+			break
+		}
+	}
+
 	return tv
+}
+
+func (ml *messagesList) fetchImage(attachment discord.Attachment) {
+	ml.imagesMu.Lock()
+	if _, ok := ml.fetchingImages[attachment.ID]; ok {
+		ml.imagesMu.Unlock()
+		return
+	}
+	ml.fetchingImages[attachment.ID] = struct{}{}
+	ml.imagesMu.Unlock()
+
+	defer func() {
+		ml.imagesMu.Lock()
+		delete(ml.fetchingImages, attachment.ID)
+		ml.imagesMu.Unlock()
+	}()
+
+	client := http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Get(attachment.URL)
+	if err != nil {
+		slog.Error("failed to download image for sixel", "err", err, "url", attachment.URL)
+		return
+	}
+	defer resp.Body.Close()
+
+	img, _, err := image.Decode(resp.Body)
+	if err != nil {
+		slog.Error("failed to decode image", "err", err)
+		return
+	}
+
+	// Resize image. Max width 600 (approx 60 columns?)
+	// 1 column is roughly 10 pixels wide. So 600px is 60 columns.
+	// We want to fit in the list.
+	width := uint(600)
+	img = resize.Resize(width, 0, img, resize.Lanczos3)
+
+	var buf bytes.Buffer
+	if err := sixel.Encode(&buf, img); err != nil {
+		slog.Error("failed to encode sixel", "err", err)
+		return
+	}
+
+	data := buf.Bytes()
+	// Estimate rows: height / 20 (approx)
+	rows := img.Bounds().Dy() / 20
+	if rows == 0 {
+		rows = 1
+	}
+
+	ml.imagesMu.Lock()
+	ml.sixelCache[attachment.ID] = sixelCacheItem{
+		data: data,
+		rows: rows,
+	}
+	ml.imagesMu.Unlock()
+
+	ml.chatView.app.QueueUpdateDraw(func() {
+		// Just trigger redraw
+	})
 }
 
 func (ml *messagesList) renderMessage(message discord.Message) string {

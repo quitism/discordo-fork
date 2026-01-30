@@ -9,6 +9,7 @@ import (
 	"github.com/ayn2op/discordo/internal/config"
 	"github.com/ayn2op/discordo/internal/consts"
 	"github.com/ayn2op/discordo/internal/keyring"
+	"github.com/ayn2op/discordo/internal/sixel"
 	"github.com/ayn2op/discordo/internal/ui/chat"
 	"github.com/ayn2op/discordo/internal/ui/login"
 	"github.com/ayn2op/tview"
@@ -46,9 +47,15 @@ func (a *App) Run() error {
 		token = t
 	}
 
+	sixel.Enabled = sixel.IsSupported()
+
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return fmt.Errorf("failed to create screen: %w", err)
+	}
+
+	if sixel.Enabled {
+		screen = sixel.NewScreen(screen)
 	}
 
 	if err := screen.Init(); err != nil {
