@@ -43,14 +43,15 @@ type View struct {
 	typersMu sync.RWMutex
 	typers   map[discord.UserID]*time.Timer
 
-	app   *tview.Application
-	cfg   *config.Config
-	state *ningen.State
+	app    *tview.Application
+	screen tcell.Screen
+	cfg    *config.Config
+	state  *ningen.State
 
 	onLogout func()
 }
 
-func NewView(app *tview.Application, cfg *config.Config, onLogout func()) *View {
+func NewView(app *tview.Application, screen tcell.Screen, cfg *config.Config, onLogout func()) *View {
 	v := &View{
 		Pages: tview.NewPages(),
 
@@ -60,6 +61,7 @@ func NewView(app *tview.Application, cfg *config.Config, onLogout func()) *View 
 		typers: make(map[discord.UserID]*time.Timer),
 
 		app:      app,
+		screen:   screen,
 		cfg:      cfg,
 		onLogout: onLogout,
 	}
